@@ -1,63 +1,86 @@
+package com.gesture.smartkeyboard
+
 import android.inputmethodservice.InputMethodService
-import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.widget.TextView
+import android.widget.LinearLayout
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ValueEventListener
 
 class SmartKeyboardService : InputMethodService() {
 
-    private var currentWord = StringBuilder()
+    private lateinit var suggestionBar: TextView
     private var lastWord = ""
-    private var currentLanguage = "es" // Toggle para es/en
+    private var currentLanguage = "es" // Puede cambiarse a "en"
+    private val database = FirebaseDatabase.getInstance().getReference("ngrams")
 
     override fun onCreateInputView(): View {
-        // Aquí inflarás el diseño XML de tu teclado (los botones)
-        // val keyboardView = layoutInflater.inflate(R.layout.keyboard_view, null)
-        // return keyboardView
-        return super.onCreateInputView()
+        // Inflamos el diseño que creamos en XML
+        val layout = layoutInflater.inflate(R.layout.keyboard_view, null) as LinearLayout
+        suggestionBar = layout.findViewById(R.id.suggestion_bar)
+        
+        // Listener para cambiar de idioma si se toca la barra (opcional)
+        suggestionBar.setOnClickListener {
+            currentLanguage = if (currentLanguage == "es") "en" else "es"
+            suggestionBar.text = "Idioma: ${currentLanguage.uppercase()}"
+        }
+        
+        return layout
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        // Se llama cuando el usuario toca un campo de texto
-        currentWord.clear()
         lastWord = ""
+        suggestionBar.text = "Esperando entrada..."
     }
 
-    // Método simulado que se llamaría cuando el usuario presiona una tecla en tu UI
-    fun handleKeyPress(primaryCode: Int) {
-        val inputConnection = currentInputConnection ?: return
-
-        when (primaryCode) {
-            KeyEvent.KEYCODE_DEL -> {
-                // Borrar
-                if (currentWord.isNotEmpty()) {
-                    currentWord.deleteCharAt(currentWord.length - 1)
-                    inputConnection.deleteSurroundingText(1, 0)
-                }
-            }
-            KeyEvent.KEYCODE_SPACE -> {
-                // Espacio presionado: Procesar la palabra
-                inputConnection.commitText(" ", 1)
-                processWord(currentWord.toString())
-            }
-            else -> {
-                // Escribir letra
-                val char = primaryCode.toChar()
-                currentWord.append(char)
-                inputConnection.commitText(char.toString(), 1)
-            }
-        }
-    }
-
-    private fun processWord(word: String) {
+    // Esta función se llama cada vez que el usuario termina una palabra
+    private fun fetchPredictions(word: String) {
         val cleanWord = word.trim().lowercase()
-        if (cleanWord.isNotEmpty()) {
-            if (lastWord.isNotEmpty()) {
-                // AQUÍ: Guardar la relación lastWord -> cleanWord
-                // Ejemplo: saveToLocalDatabase(lastWord, cleanWord, currentLanguage)
-            }
-            lastWord = cleanWord
-            currentWord.clear()
-        }
+        if (cleanWord.isEmpty()) return
+
+        // Consultamos Firebase: ngrams -> idioma -> palabra_actual
+        database.child(currentLanguage).child(cleanWord)
+            .orderByValue() // Ordenar por frecuencia
+            .limitToLast(3) // Traer las 3 más usadas
+            .addListenerForSingleValueEvent(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val suggestions = mutableListOf<String>()
+                    for (child in snapshot.children) {
+                        child.key?.let { suggestions.add(it) }
+                    }
+                    
+                    // Invertimos para que la más frecuente salga primero
+                    suggestions.reverse()
+                    
+                    // Actualizamos la UI del teclado
+                    if (suggestions.isNotEmpty()) {
+                        suggestionBar.text = suggestions.joinToString("   |   ")
+                    } else {
+                        suggestionBar.text = "..."
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {
+                    suggestionBar.text = "Error de conexión"
+                }
+            })
+    }
+
+    // Función que el programador usará para insertar texto desde los gestos
+    fun onGestureWordDetected(detectedWord: String) {
+        val ic = currentInputConnection ?: return
+        
+        // 1. Insertar la palabra detectada
+        ic.commitText("$detectedWord ", 1)
+        
+        // 2. Buscar qué palabra sigue según la base de datos
+        fetchPredictions(detectedWord)
+        
+        // 3. Guardar como última palabra para el contexto
+        lastWord = detectedWord
     }
 }
